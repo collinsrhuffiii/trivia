@@ -212,7 +212,7 @@ func main() {
 			counts := countAnswersFull(result, answers)
 			for i, val := range answers {
 				fmt.Printf("\n%q\t\t%d", val, counts[i])
-				if counts[i] < largest {
+				if counts[i] <= largest {
 					largest = counts[i]
 					bestAnswer = val
 				}
