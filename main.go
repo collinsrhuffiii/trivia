@@ -16,8 +16,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -62,7 +60,10 @@ func getText() string {
 	client := gosseract.NewClient()
 	defer client.Close()
 	client.SetImage("cropped.png")
-	text, _ := client.Text()
+	text, err := client.Text()
+	if err != nil {
+		log.Fatal(err)
+	}
 	return text
 }
 
@@ -86,33 +87,6 @@ func splitText(s string) (string, []string) {
 	answers = deleteEmpty(answers)
 
 	return strings.Replace(question, "\n", " ", -1), answers
-}
-
-func getNumResults(url string) int {
-	response, _ := http.Get(url)
-	s, _ := ioutil.ReadAll(response.Body)
-	html := string(s)
-	indexResults := strings.Index(html, `id="resultStats"`)
-	resultsString := html[indexResults : indexResults+60]
-	indexOpenTag := strings.Index(resultsString, ">")
-	indexCloseTag := strings.Index(resultsString, "<")
-	resultsString = resultsString[indexOpenTag+1 : indexCloseTag]
-	reg, _ := regexp.Compile("[^0-9]+")
-	resultsString = reg.ReplaceAllString(resultsString, "")
-	numResults, _ := strconv.Atoi(resultsString)
-	return numResults
-}
-
-func countMatches(url string, answers []string) []int {
-	response, _ := http.Get(url)
-	s, _ := ioutil.ReadAll(response.Body)
-	html := string(s)
-	_ = ioutil.WriteFile("index.html", s, 0644)
-	results := make([]int, len(answers))
-	for ind, val := range answers {
-		results[ind] = strings.Count(html, val)
-	}
-	return results
 }
 
 func initializeSearch() (*customsearch.Service, string) {
@@ -143,11 +117,11 @@ func initializeSearch() (*customsearch.Service, string) {
 	return cseService, id
 }
 
-func countAnswersFull(search *customsearch.Search, answers []string) []int {
+func countAnswersFull(results []*customsearch.Result, answers []string) []int {
 	counts := make([]int, len(answers))
 	ch := make(chan []int)
 	for i := 0; i < 5; i++ {
-		result := search.Items[i]
+		result := results[i]
 		go countAnswersPage(result.Link, answers, ch)
 	}
 	for i := 0; i < 5; i++ {
@@ -159,9 +133,9 @@ func countAnswersFull(search *customsearch.Search, answers []string) []int {
 	return counts
 }
 
-func countAnswersSnippet(search *customsearch.Search, answers []string) []int {
+func countAnswersSnippet(results []*customsearch.Result, answers []string) []int {
 	counts := make([]int, len(answers))
-	for _, result := range search.Items {
+	for _, result := range results {
 		for i, answer := range answers {
 			counts[i] = counts[i] + strings.Count(result.HtmlSnippet, answer)
 		}
@@ -174,6 +148,7 @@ func countAnswersPage(url string, answers []string, ch chan<- []int) {
 	resp, err := http.Get(url)
 	s, _ := ioutil.ReadAll(resp.Body)
 	html := string(s)
+	html = strings.ToLower(html)
 	if err == nil {
 		for i, val := range answers {
 			counts[i] = strings.Count(html, val)
@@ -191,6 +166,30 @@ func isZeros(array []int) bool {
 	return true
 }
 
+/*
+func questionKeywordSearch(question string, answers []string, r *rake.Rake, cseService *customsearch.Service) []int {
+	wordScores := r.Run(question)
+	keywordString := ""
+	for _, word := range wordScores {
+		keywordString = keywordString + word.Keyword
+	}
+
+	search := cseService.Cse.List(
+	search.Cx(searchID)
+	result, _ := search.Do()
+
+}
+*/
+func search(cseService *customsearch.Service, query, searchID string) []*customsearch.Result {
+	search := cseService.Cse.List(query)
+	search.Cx(searchID)
+	searchResults, err := search.Do()
+	if err != nil {
+		log.Fatal(err)
+	}
+	return searchResults.Items
+}
+
 func main() {
 	cseService, searchID := initializeSearch()
 	initializeView()
@@ -201,30 +200,28 @@ func main() {
 		start := time.Now()
 		getImage()
 		question, answers := splitText(getText())
+		question = strings.ToLower(question)
+		for i := range answers {
+			answers[i] = strings.ToLower(answers[i])
+		}
 		fmt.Println(question)
 		var bestAnswer string
-		var largest int
-		if strings.Contains(question, "NOT") {
-			question = strings.Replace(question, "NOT", "", 1)
-			search := cseService.Cse.List(question)
-			search.Cx(searchID)
-			result, _ := search.Do()
-			counts := countAnswersFull(result, answers)
+		if strings.Contains(question, "not") {
+			var smallest int
+			question = strings.Replace(question, "not", "", 1)
+			results := search(cseService, question, searchID)
+			counts := countAnswersFull(results, answers)
 			for i, val := range answers {
 				fmt.Printf("\n%q\t\t%d", val, counts[i])
-				if counts[i] <= largest {
-					largest = counts[i]
+				if counts[i] <= smallest {
+					smallest = counts[i]
 					bestAnswer = val
 				}
 			}
 		} else {
-			search := cseService.Cse.List(question)
-			search.Cx(searchID)
-			result, err := search.Do()
-			if err != nil {
-				log.Fatal(err)
-			}
-			counts := countAnswersFull(result, answers)
+			var largest int
+			results := search(cseService, question, searchID)
+			counts := countAnswersFull(results, answers)
 			for i, val := range answers {
 				fmt.Printf("\n%q\t\t%d", val, counts[i])
 				if counts[i] > largest {
